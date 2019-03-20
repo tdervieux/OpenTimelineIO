@@ -29,11 +29,19 @@ import os
 import sys
 import argparse
 import ast
+from collections import OrderedDict
 from PySide2 import QtWidgets, QtGui
 
 import opentimelineio as otio
 import opentimelineview as otioViewWidget
 from opentimelineview import settings
+
+
+NAVIGATION_FILTER = OrderedDict([("Nested Clip", 0b00001),
+                                 ("Gap", 0b00010),
+                                 ("Effect", 0b00100),
+                                 ("Marker", 0b01000),
+                                 ("All", 0b10000)])
 
 
 def _parsed_args():
@@ -131,6 +139,12 @@ class Main(QtWidgets.QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(exit_action)
 
+        # navegation menu
+        navegation_menu = QtWidgets.QMenu()
+        navegation_menu.setTitle("nav")
+        menubar.addMenu(navegation_menu)
+        self._create_navegtion_menu(navegation_menu, menubar)
+
         # signals
         self.tracks_widget.itemSelectionChanged.connect(
             self._change_track
@@ -190,6 +204,27 @@ class Main(QtWidgets.QMainWindow):
         if selection:
             self.timeline_widget.set_timeline(selection[0].timeline)
 
+    def _create_navegtion_menu(self, navegation_menu, menubar):
+        actions = list()
+        for filter in otioViewWidget.timeline_widget.NAVIGATION_FILTER.keys():
+            action = navegation_menu.addAction(filter)
+            action.setCheckable(True)
+            action.setChecked(True)
+            actions.append(action)
+
+        def __callback():
+            self._navegation_filter_callback(actions)
+        navegation_menu.triggered[[QtWidgets.QAction]].connect(__callback)
+
+    def _navegation_filter_callback(self, filters):
+        nav_filter = 0
+        for filter in filters:
+            if filter.isChecked():
+                nav_filter += NAVIGATION_FILTER[filter.text()]
+            print filter.text(), filter.isChecked(), NAVIGATION_FILTER[filter.text()]
+
+        self.timeline_widget.navegationfilter_changed.emit(nav_filter)
+
     def center(self):
         frame = self.frameGeometry()
         desktop = QtWidgets.QApplication.desktop()
@@ -203,7 +238,6 @@ class Main(QtWidgets.QMainWindow):
     def show(self):
         super(Main, self).show()
         self.timeline_widget.frame_all()
-
 
 
 def main():

@@ -38,6 +38,22 @@ MARKER_SIZE = 10
 RULER_SIZE = 10
 EFFECT_HEIGHT = 1/3.0 * TRACK_HEIGHT
 
+NAVIGATION_FILTER = OrderedDict([("Nested Clip", 0b00001),
+                                 ("Gap", 0b00010),
+                                 ("Effect", 0b00100),
+                                 ("Marker", 0b01000),
+                                 ("All", 0b10000)])
+'''
+Clip
+Nested Clip
+Gap
+Transition
+Item with Marker
+Item with Effect
+All
+'''
+
+
 
 class _BaseItem(QtWidgets.QGraphicsRectItem):
 
@@ -85,7 +101,6 @@ class _BaseItem(QtWidgets.QGraphicsRectItem):
 
     def _add_markers(self):
         trimmed_range = self.item.trimmed_range()
-
         for m in self.item.markers:
             marked_time = m.marked_range.start_time
             if not trimmed_range.overlaps(marked_time):
@@ -535,9 +550,9 @@ class Ruler(QtWidgets.QGraphicsPolygonItem):
     def contextMenuEvent(self, event):
         menu = QtWidgets.QMenu()
         for name, label in self.time_space.items():
-            callback = lambda name_str = name: \
-                self.set_time_space_callback(name_str)
-            menu.addAction(label, callback)
+            def __callback():
+                self.set_time_space_callback(name)
+            menu.addAction(label, __callback)
         menu.exec_(event.screenPos())
 
         super(Ruler, self).contextMenuEvent(event)
@@ -553,6 +568,10 @@ class Ruler(QtWidgets.QGraphicsPolygonItem):
         self.update_frame()
 
         super(Ruler, self).mouseMoveEvent(mouse_event)
+
+    def mouseReleaseEvent(self, mouse_event):
+        self.setSelected(False)
+        super(Ruler, self).mouseReleaseEvent(mouse_event)
 
     def hoverEnterEvent(self, event):
         self.setSelected(True)
@@ -709,6 +728,8 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
         self._add_markers()
         self._ruler = self._add_ruler()
 
+        self._data_cache = self._cache_items_tracks()
+
     def _adjust_scene_size(self):
         scene_range = self.composition.trimmed_range()
 
@@ -857,6 +878,156 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
     def get_ruler(self):
         return self._ruler
 
+    def OLD_get_next_item(self, item, direction):
+        '''
+        direction > 0 means right
+        '''
+        track = item.parentItem()
+        next_item = None
+        if direction > 0:
+            next_item = self._data_cache[track][item]["right"]
+        else:
+            next_item = self._data_cache[track][item]["left"]
+                
+        return next_item
+
+    def OLD_get_next_track(self,track, direction):
+        '''
+        direction > 0 means going down
+        '''
+        next_track = None
+        if direction > 0:
+            next_track =  self._data_cache[track]["down"]
+        else :
+            next_track =  self._data_cache[track]["up"]
+        
+        return next_track
+
+    def get_next_item(self, item, key):
+        NAV={QtCore.Qt.Key_Right:"right",
+        QtCore.Qt.Key_Left:"left",
+        QtCore.Qt.Key_Up:"up",
+        QtCore.Qt.Key_Down:"down"}
+
+        next_item = item
+        d_key = NAV[key]
+        track = item.parentItem()
+        if d_key in ["left", "right"] :
+            next_item =  self._data_cache[track][item][d_key]
+        elif d_key in ["up", "down"] :
+            next_track = self._data_cache[track][d_key]
+            newXpos = item.pos().x()
+            newYpos = next_track.pos().y()
+            newPosition = QtCore.QPointF(newXpos, newYpos)
+            next_item = self.itemAt(newPosition, QtGui.QTransform())
+            if isinstance(next_item, Track):
+                next_item = self._data_cache[next_track]["last"]
+        return next_item
+
+    def get_next_item_filters(self, item, key, filters) :
+        original_item = item
+        next_item = None
+        while not match_filters(next_item, filters):
+            next_item =  self.get_next_item(item, key)
+            if key in [QtCore.Qt.Key_Up, QtCore.Qt.Key_Down] and \
+                not match_filters(next_item, filters):
+                # look for closest in both direction
+                next_right = self.get_next_item_filters(next_item, 
+                                                         QtCore.Qt.Key_Right,
+                                                         filters)
+                next_left = self.get_next_item_filters(next_item, 
+                                                        QtCore.Qt.Key_Left,
+                                                        filters)
+                # 3 cases
+                if not next_right == next_item and not next_left == next_item:
+                    # get the closest
+                    dist_to_r = abs(item.pos().x()-(next_right.pos().x()+next_right.rect().width()))
+                    dist_to_l = abs(item.pos().x() - next_left.pos().x())
+                    if dist_to_r < dist_to_l :
+                        next_item = next_right
+                    else:
+                        next_item = next_left
+                elif not next_right == next_item and next_left == next_item:
+                    next_item = next_right
+                elif next_right == next_item and not next_left == next_item:
+                    next_item = next_left
+
+            if next_item == item:
+                next_item = original_item
+                break
+            item = next_item
+        return next_item
+            
+
+            
+
+    def _cache_items_tracks(self):
+        '''
+        Similar to a double linked list, this function creates a data structure
+        to retrieve the previous (left) or next (right) otio item from
+        the current item.
+        In the same manner, for each tracks, this function create a cache 
+        to retrieve the track above(up) and below(down)
+        ei: retrieve otio element on the right from item :
+        data_cache[track_item][item]["right"]
+        retrieve the track above
+        data_cache[track_item]["up"]
+        '''
+
+        data_cache = dict() 
+        tracks = list()
+        for track_item in self.items():
+            if not isinstance(track_item, Track):
+                continue
+            tracks.append(track_item)
+            items_right = track_item.childItems()
+            data_cache[track_item] = {"up":None, 
+                                      "down":None,
+                                      "first":None,
+                                      "last":None}
+            items_right.sort(key=lambda x: x.timeline_range.start_time.value)
+            items_left = sorted(items_right,
+                                key=lambda x:
+                                x.timeline_range.start_time.value +
+                                x.timeline_range.duration.value)
+
+            index_last_item = len(items_right) - 1
+            for i, item in enumerate(items_right):
+                data_cache[track_item][item] = {"right": None, "left": None}
+                data_cache[track_item][item]["right"] = \
+                    items_right[min(index_last_item, i+1)]
+    
+            for i, item in enumerate(items_left):
+                data_cache[track_item][item]["left"] = \
+                    items_left[max(0, i-1)]
+
+            data_cache[track_item]["last"] = items_left[-1]
+            data_cache[track_item]["first"] = items_right[0]
+
+        tracks.sort(key=lambda y: y.pos().y())
+        index_last_track = len(tracks) - 1
+        for i, track_item in enumerate(tracks):
+            data_cache[track_item]["up"]=tracks[max(0, i-1)]
+            data_cache[track_item]["down"]=tracks[min(index_last_track, i+1)]
+
+        return data_cache
+
+
+def match_filters(item, filters=None):
+    if not item:
+        return False
+
+    if filters is None:
+        return True
+
+    for filter in filters:
+        if isinstance(item, filter):
+            return True
+        # for child_item in item.childItems():
+        #     if isinstance(child_item, filter):
+        #         return True
+    return False
+
 
 class CompositionView(QtWidgets.QGraphicsView):
 
@@ -871,6 +1042,8 @@ class CompositionView(QtWidgets.QGraphicsView):
         self.setAlignment((QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop))
         self.setStyleSheet('border: 0px;')
         self.scene().selectionChanged.connect(self.parse_selection_change)
+
+        self.navigation_filter = "Gap"
 
     def parse_selection_change(self):
         selection = self.scene().selectedItems()
@@ -923,7 +1096,8 @@ class CompositionView(QtWidgets.QGraphicsView):
 
         return self.scene().itemAt(newPosition, QtGui.QTransform())
 
-    def _get_left_item(self, curSelectedItem):
+    # this function is not needed anymore
+    def OLD_get_left_item(self, curSelectedItem):
         curItemXpos = curSelectedItem.pos().x()
 
         if curSelectedItem.parentItem():
@@ -942,7 +1116,8 @@ class CompositionView(QtWidgets.QGraphicsView):
 
         return self.scene().itemAt(newPosition, QtGui.QTransform())
 
-    def _get_right_item(self, curSelectedItem):
+    # this function is not needed anymore
+    def OLD_get_right_item(self, curSelectedItem):
         curItemXpos = curSelectedItem.pos().x()
 
         if curSelectedItem.parentItem():
@@ -958,6 +1133,7 @@ class CompositionView(QtWidgets.QGraphicsView):
 
         return self.scene().itemAt(newPosition, QtGui.QTransform())
 
+    # this function is not needed anymore
     def _get_up_item(self, curSelectedItem):
         curItemXpos = curSelectedItem.pos().x()
 
@@ -985,6 +1161,7 @@ class CompositionView(QtWidgets.QGraphicsView):
 
         return self.scene().itemAt(newPosition, QtGui.QTransform())
 
+    # this function is not needed anymore
     def _get_down_item(self, curSelectedItem):
         curItemXpos = curSelectedItem.pos().x()
 
@@ -1038,41 +1215,48 @@ class CompositionView(QtWidgets.QGraphicsView):
     def _get_new_item(self, key_event, curSelectedItem):
         key = key_event.key()
         modifier = key_event.modifiers()
-        if key in (
+
+        if not (key in (
                 QtCore.Qt.Key_Left,
                 QtCore.Qt.Key_Right,
                 QtCore.Qt.Key_Up,
                 QtCore.Qt.Key_Down,
                 QtCore.Qt.Key_Return,
                 QtCore.Qt.Key_Enter
-        ) and not (modifier & QtCore.Qt.ControlModifier):
-            if key == QtCore.Qt.Key_Left:
-                newSelectedItem = self._get_left_item(curSelectedItem)
-            elif key == QtCore.Qt.Key_Right:
-                newSelectedItem = self._get_right_item(curSelectedItem)
-            elif key == QtCore.Qt.Key_Up:
-                newSelectedItem = self._get_up_item(curSelectedItem)
-            elif key == QtCore.Qt.Key_Down:
-                newSelectedItem = self._get_down_item(curSelectedItem)
-            elif key in [QtCore.Qt.Key_Return, QtCore.Qt.Key_Return]:
-                if isinstance(curSelectedItem, NestedItem):
-                    curSelectedItem.keyPressEvent(key_event)
-                    newSelectedItem = None
-        else:
-            newSelectedItem = None
+        ) and not (modifier & QtCore.Qt.ControlModifier)):
+            return None
 
+        ruler = self.scene().get_ruler()
+        ruler_vis = ruler.isVisible()
+        ruler.setVisible(not ruler_vis)
+
+        if key in [QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, 
+                   QtCore.Qt.Key_Up, QtCore.Qt.Key_Down] :
+            filters = self.get_filters()
+            newSelectedItem = self.scene().get_next_item_filters(
+                              curSelectedItem, key, filters)
+            
+        elif key in [QtCore.Qt.Key_Return, QtCore.Qt.Key_Return]:
+            if isinstance(curSelectedItem, NestedItem):
+                curSelectedItem.keyPressEvent(key_event)
+                newSelectedItem = None
+
+        ruler.setVisible(ruler_vis)
         return newSelectedItem
 
     def keyPressEvent(self, key_event):
         super(CompositionView, self).keyPressEvent(key_event)
         self.setInteractive(True)
 
+        # Remove Ruler instance from selection
+        selections = filter(lambda x : not isinstance(x, Ruler),
+                self.scene().selectedItems())
         # No item selected, so select the first item
-        if len(self.scene().selectedItems()) <= 0:
+        if len(selections) <= 0:
             newSelectedItem = self._get_first_item()
         # Based on direction key, select new selected item
         else:
-            curSelectedItem = self.scene().selectedItems()[0]
+            curSelectedItem = selections[0]
 
             # Check to see if the current selected item is a rect item
             # If current selected item is not a rect, then extra tests
@@ -1082,10 +1266,11 @@ class CompositionView(QtWidgets.QGraphicsView):
                     curSelectedItem = curSelectedItem.parentItem()
 
             newSelectedItem = self._get_new_item(key_event, curSelectedItem)
-            self._keyPress_frame_all(key_event)
             self._snap(key_event, curSelectedItem)
         if newSelectedItem:
             self._select_new_item(newSelectedItem)
+
+        self._keyPress_frame_all(key_event)
 
     def _snap(self, key_event, curSelectedItem):
         key = key_event.key()
@@ -1131,10 +1316,23 @@ class CompositionView(QtWidgets.QGraphicsView):
         for item in items_to_scale:
             item.counteract_zoom(zoom_level)
 
+    def navigationfilter_changed(self, value):
+        '''
+        Update the navigation filter
+        '''
+        print "in timeline_you widget", value
+        self.navigation_filter = "Marker"
+
+    def get_filters(self):
+        '''
+        @ TODO for testing
+        '''
+        return [GapItem]
 
 class Timeline(QtWidgets.QTabWidget):
 
     selection_changed = QtCore.Signal(otio.core.SerializableObject)
+    navegationfilter_changed = QtCore.Signal(int)
 
     def __init__(self, *args, **kwargs):
         super(Timeline, self).__init__(*args, **kwargs)
@@ -1184,6 +1382,9 @@ class Timeline(QtWidgets.QTabWidget):
 
         new_stack.open_stack.connect(self.add_stack)
         new_stack.selection_changed.connect(self.selection_changed)
+        self.navegationfilter_changed.connect(
+            new_stack.navigationfilter_changed
+        )
         self.setCurrentIndex(self.count() - 1)
         self.frame_all()
 
