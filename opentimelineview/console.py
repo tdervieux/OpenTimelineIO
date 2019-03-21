@@ -37,13 +37,6 @@ import opentimelineview as otioViewWidget
 from opentimelineview import settings
 
 
-NAVIGATION_FILTER = OrderedDict([("Nested Clip", 0b00001),
-                                 ("Gap", 0b00010),
-                                 ("Effect", 0b00100),
-                                 ("Marker", 0b01000),
-                                 ("All", 0b10000)])
-
-
 def _parsed_args():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -141,7 +134,9 @@ class Main(QtWidgets.QMainWindow):
 
         # navegation menu
         navegation_menu = QtWidgets.QMenu()
-        navegation_menu.setTitle("nav")
+        navegation_menu.setTitle("Navigation")
+        navegation_menu.setTearOffEnabled(False)
+        navegation_menu.setWindowTitle("toto")
         menubar.addMenu(navegation_menu)
         self._create_navegtion_menu(navegation_menu, menubar)
 
@@ -206,10 +201,10 @@ class Main(QtWidgets.QMainWindow):
 
     def _create_navegtion_menu(self, navegation_menu, menubar):
         actions = list()
-        for filter in otioViewWidget.timeline_widget.NAVIGATION_FILTER.keys():
-            action = navegation_menu.addAction(filter)
+        for label, nav in otioViewWidget.timeline_widget.Nav.FILTER.items():
+            action = navegation_menu.addAction(label)
             action.setCheckable(True)
-            action.setChecked(True)
+            action.setChecked(nav.default)
             actions.append(action)
 
         def __callback():
@@ -220,8 +215,8 @@ class Main(QtWidgets.QMainWindow):
         nav_filter = 0
         for filter in filters:
             if filter.isChecked():
-                nav_filter += NAVIGATION_FILTER[filter.text()]
-            print filter.text(), filter.isChecked(), NAVIGATION_FILTER[filter.text()]
+                nav_filter += otioViewWidget.timeline_widget.\
+                              Nav.FILTER[filter.text()].bitmask
 
         self.timeline_widget.navegationfilter_changed.emit(nav_filter)
 

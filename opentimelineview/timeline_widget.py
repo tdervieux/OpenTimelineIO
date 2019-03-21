@@ -38,21 +38,40 @@ MARKER_SIZE = 10
 RULER_SIZE = 10
 EFFECT_HEIGHT = 1/3.0 * TRACK_HEIGHT
 
-NAVIGATION_FILTER = OrderedDict([("Nested Clip", 0b00001),
-                                 ("Gap", 0b00010),
-                                 ("Effect", 0b00100),
-                                 ("Marker", 0b01000),
-                                 ("All", 0b10000)])
-'''
-Clip
-Nested Clip
-Gap
-Transition
-Item with Marker
-Item with Effect
-All
-'''
+nav_menu = namedtuple("nav_menu",
+                      ["bitmask", "otioItem", "default","exclusive"])
 
+KEY_SYM = {QtCore.Qt.Key_Left: QtCore.Qt.Key_Right,
+           QtCore.Qt.Key_Right: QtCore.Qt.Key_Left,
+           QtCore.Qt.Key_Up: QtCore.Qt.Key_Down,
+           QtCore.Qt.Key_Down: QtCore.Qt.Key_Up}
+
+
+class Nav(object):
+    FILTER = OrderedDict([
+        ("Clip", nav_menu(0b00000001, "ClipItem", True, False)),
+        ("Nested Clip", nav_menu(0b00000010, "NestedItem", True, False)),
+        ("Gap", nav_menu(0b00000100, "GapItem", True, False)),
+        ("Transition", nav_menu(0b00001000, "TransitionItem", True, False)),
+        ("Only with Marker", nav_menu(0b00010000, "Marker", False, True)),
+        ("Only with Effect", nav_menu(0b00100000, "EffectItem", False, True)),
+        # ("All", nav_menu(0b01000000, "None", False)) @TODO not implemented
+        ])
+
+    @classmethod
+    def GetClass(cls, bitmask):
+        classes = list()
+        for item in cls.FILTER.itervalues():
+            if bitmask & item.bitmask:
+                item._replace(otioItem=eval(item.otioItem))
+                classes.append(item)
+        return classes
+
+    @classmethod
+    def IsChild(cls, bitmask):
+        if bitmask & 0b00010000 or bitmask & 0b00100000:
+            return True
+        return False
 
 
 class _BaseItem(QtWidgets.QGraphicsRectItem):
@@ -61,6 +80,11 @@ class _BaseItem(QtWidgets.QGraphicsRectItem):
         super(_BaseItem, self).__init__(*args, **kwargs)
         self.item = item
         self.timeline_range = timeline_range
+
+        # List of widgets that hold a .item that is
+        # a otio.core.SerializableObject
+        # it excludes decorator widgets as QLabel ...
+        self._otio_children = list()
 
         self.setFlags(QtWidgets.QGraphicsItem.ItemIsSelectable)
         self.setBrush(
@@ -116,6 +140,7 @@ class _BaseItem(QtWidgets.QGraphicsRectItem):
                 ) * TIME_MULTIPLIER
             )
             marker.setParentItem(self)
+            self._add_otio_child(marker)
 
     def _add_effects(self):
         if not hasattr(self.item, "effects"):
@@ -124,6 +149,13 @@ class _BaseItem(QtWidgets.QGraphicsRectItem):
             return
         effect = EffectItem(self.item.effects, self.rect())
         effect.setParentItem(self)
+        self._add_otio_child(effect)
+
+    def _add_otio_child(self, item):
+        self._otio_children.append(item)
+
+    def get_otio_children(self):
+        return self._otio_children
 
     def _position_labels(self):
         self.source_in_label.setY(LABEL_MARGIN)
@@ -878,43 +910,18 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
     def get_ruler(self):
         return self._ruler
 
-    def OLD_get_next_item(self, item, direction):
-        '''
-        direction > 0 means right
-        '''
-        track = item.parentItem()
-        next_item = None
-        if direction > 0:
-            next_item = self._data_cache[track][item]["right"]
-        else:
-            next_item = self._data_cache[track][item]["left"]
-                
-        return next_item
-
-    def OLD_get_next_track(self,track, direction):
-        '''
-        direction > 0 means going down
-        '''
-        next_track = None
-        if direction > 0:
-            next_track =  self._data_cache[track]["down"]
-        else :
-            next_track =  self._data_cache[track]["up"]
-        
-        return next_track
-
     def get_next_item(self, item, key):
-        NAV={QtCore.Qt.Key_Right:"right",
-        QtCore.Qt.Key_Left:"left",
-        QtCore.Qt.Key_Up:"up",
-        QtCore.Qt.Key_Down:"down"}
+        NAV = {QtCore.Qt.Key_Right: "right",
+               QtCore.Qt.Key_Left: "left",
+               QtCore.Qt.Key_Up: "up",
+               QtCore.Qt.Key_Down: "down"}
 
         next_item = item
         d_key = NAV[key]
         track = item.parentItem()
-        if d_key in ["left", "right"] :
-            next_item =  self._data_cache[track][item][d_key]
-        elif d_key in ["up", "down"] :
+        if d_key in ["left", "right"]:
+            next_item = self._data_cache[track][item][d_key]
+        elif d_key in ["up", "down"]:
             next_track = self._data_cache[track][d_key]
             newXpos = item.pos().x()
             newYpos = next_track.pos().y()
@@ -924,67 +931,72 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
                 next_item = self._data_cache[next_track]["last"]
         return next_item
 
-    def get_next_item_filters(self, item, key, filters) :
+    def _get_closest_item(self, item, posx, filters):
+        next_item = item
+        next_right = self.get_next_item_filters(item,
+                                                QtCore.Qt.Key_Right,
+                                                filters)
+        next_left = self.get_next_item_filters(item,
+                                               QtCore.Qt.Key_Left,
+                                               filters)
+        # 3 cases 
+        # 1. next_right and next_left are both valid
+        if not next_right == item and not next_left == item:
+            # get the closest
+            dist_to_r = abs(posx - (next_right.pos().x() +
+                                    next_right.rect().width()))
+            dist_to_l = abs(posx - next_left.pos().x())
+            if dist_to_r < dist_to_l:
+                next_item = next_right
+            else:
+                next_item = next_left
+        # 2. only next_right is valid
+        elif not next_right == item and next_left == item:
+            next_item = next_right
+        # 3. only next_left is valid
+        elif next_right == item and not next_left == item:
+            next_item = next_left
+        return next_item
+
+    def get_next_item_filters(self, item, key, filters):
         original_item = item
         next_item = None
         while not match_filters(next_item, filters):
-            next_item =  self.get_next_item(item, key)
+            next_item = self.get_next_item(item, key)
             if key in [QtCore.Qt.Key_Up, QtCore.Qt.Key_Down] and \
-                not match_filters(next_item, filters):
-                # look for closest in both direction
-                next_right = self.get_next_item_filters(next_item, 
-                                                         QtCore.Qt.Key_Right,
-                                                         filters)
-                next_left = self.get_next_item_filters(next_item, 
-                                                        QtCore.Qt.Key_Left,
-                                                        filters)
-                # 3 cases
-                if not next_right == next_item and not next_left == next_item:
-                    # get the closest
-                    dist_to_r = abs(item.pos().x()-(next_right.pos().x()+next_right.rect().width()))
-                    dist_to_l = abs(item.pos().x() - next_left.pos().x())
-                    if dist_to_r < dist_to_l :
-                        next_item = next_right
-                    else:
-                        next_item = next_left
-                elif not next_right == next_item and next_left == next_item:
-                    next_item = next_right
-                elif next_right == next_item and not next_left == next_item:
-                    next_item = next_left
-
+               not match_filters(next_item, filters):
+                next_item = self._get_closest_item(next_item, item.pos().x(),
+                                                   filters)
             if next_item == item:
                 next_item = original_item
                 break
             item = next_item
         return next_item
-            
-
-            
 
     def _cache_items_tracks(self):
         '''
-        Similar to a double linked list, this function creates a data structure
-        to retrieve the previous (left) or next (right) otio item from
-        the current item.
-        In the same manner, for each tracks, this function create a cache 
-        to retrieve the track above(up) and below(down)
-        ei: retrieve otio element on the right from item :
-        data_cache[track_item][item]["right"]
-        retrieve the track above
-        data_cache[track_item]["up"]
+        Create a sort of doubly linked list to retrieve navigate from items to
+        items
+        item->get_next_right or item->get_next_left.
+        Likewise for track
+        track->get_next_up & track->get_next_up
+        Additionaly
+        track->get_last_item & track->get_first_item
         '''
 
-        data_cache = dict() 
+        data_cache = dict()
+
         tracks = list()
         for track_item in self.items():
             if not isinstance(track_item, Track):
                 continue
+            # @TODO I do not think that I need to do a left and right list
             tracks.append(track_item)
             items_right = track_item.childItems()
-            data_cache[track_item] = {"up":None, 
-                                      "down":None,
-                                      "first":None,
-                                      "last":None}
+            data_cache[track_item] = {"up": None,
+                                      "down": None,
+                                      "first": None,
+                                      "last": None}
             items_right.sort(key=lambda x: x.timeline_range.start_time.value)
             items_left = sorted(items_right,
                                 key=lambda x:
@@ -996,7 +1008,7 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
                 data_cache[track_item][item] = {"right": None, "left": None}
                 data_cache[track_item][item]["right"] = \
                     items_right[min(index_last_item, i+1)]
-    
+
             for i, item in enumerate(items_left):
                 data_cache[track_item][item]["left"] = \
                     items_left[max(0, i-1)]
@@ -1007,10 +1019,35 @@ class CompositionWidget(QtWidgets.QGraphicsScene):
         tracks.sort(key=lambda y: y.pos().y())
         index_last_track = len(tracks) - 1
         for i, track_item in enumerate(tracks):
-            data_cache[track_item]["up"]=tracks[max(0, i-1)]
-            data_cache[track_item]["down"]=tracks[min(index_last_track, i+1)]
+            data_cache[track_item]["up"] = tracks[max(0, i-1)]
+            data_cache[track_item]["down"] = tracks[min(index_last_track, i+1)]
 
         return data_cache
+
+
+def OLDmatch_filters(item, filters=None):
+    if not item:
+        return False
+
+    if filters is None:
+        return item
+
+    # For optimization purpose, it tests the exclusive filters first 
+    # so it fails sooner
+    filters.sort(key=lambda x: not Nav.IsChild(x.bitmask))
+    otio_children = list()
+    if isinstance(item, _BaseItem):
+        otio_children = item.get_otio_children()
+    for filter in filters:
+        if Nav.IsChild(filter.bitmask):
+            excl_item = [i for i in otio_children
+                         if isinstance(i, filter.otioItem)]
+            if not excl_item:
+                return False
+        elif isinstance(item, filter.otioItem):
+            return item
+
+    return False
 
 
 def match_filters(item, filters=None):
@@ -1018,14 +1055,25 @@ def match_filters(item, filters=None):
         return False
 
     if filters is None:
-        return True
+        return item
 
+    # For optimization purpose, it tests the exclusive filters first 
+    # so it fails sooner
+    filters.sort(key=lambda x: not Nav.IsChild(x.bitmask))
+    otio_children = list()
+    if isinstance(item, _BaseItem):
+        otio_children = item.get_otio_children()
+
+    
     for filter in filters:
-        if isinstance(item, filter):
-            return True
-        # for child_item in item.childItems():
-        #     if isinstance(child_item, filter):
-        #         return True
+        if Nav.IsChild(filter.bitmask):
+            excl_item = [i for i in otio_children
+                         if isinstance(i, filter.otioItem)]
+            if not excl_item:
+                return False
+        elif isinstance(item, filter.otioItem):
+            return item
+
     return False
 
 
@@ -1043,7 +1091,8 @@ class CompositionView(QtWidgets.QGraphicsView):
         self.setStyleSheet('border: 0px;')
         self.scene().selectionChanged.connect(self.parse_selection_change)
 
-        self.navigation_filter = "Gap"
+        self._navigation_filter = None
+        self._last_item_cache = {"key": None, "item": None}
 
     def parse_selection_change(self):
         selection = self.scene().selectedItems()
@@ -1096,101 +1145,6 @@ class CompositionView(QtWidgets.QGraphicsView):
 
         return self.scene().itemAt(newPosition, QtGui.QTransform())
 
-    # this function is not needed anymore
-    def OLD_get_left_item(self, curSelectedItem):
-        curItemXpos = curSelectedItem.pos().x()
-
-        if curSelectedItem.parentItem():
-            curTrackYpos = curSelectedItem.parentItem().pos().y()
-
-            newXpos = curItemXpos - 1
-            newYpos = curTrackYpos
-
-            if newXpos < 0:
-                newXpos = 0
-        else:
-            newXpos = curItemXpos
-            newYpos = curSelectedItem.y()
-
-        newPosition = QtCore.QPointF(newXpos, newYpos)
-
-        return self.scene().itemAt(newPosition, QtGui.QTransform())
-
-    # this function is not needed anymore
-    def OLD_get_right_item(self, curSelectedItem):
-        curItemXpos = curSelectedItem.pos().x()
-
-        if curSelectedItem.parentItem():
-            curTrackYpos = curSelectedItem.parentItem().pos().y()
-
-            newXpos = curItemXpos + curSelectedItem.rect().width()
-            newYpos = curTrackYpos
-        else:
-            newXpos = curItemXpos
-            newYpos = curSelectedItem.y()
-
-        newPosition = QtCore.QPointF(newXpos, newYpos)
-
-        return self.scene().itemAt(newPosition, QtGui.QTransform())
-
-    # this function is not needed anymore
-    def _get_up_item(self, curSelectedItem):
-        curItemXpos = curSelectedItem.pos().x()
-
-        if curSelectedItem.parentItem():
-            curTrackYpos = curSelectedItem.parentItem().pos().y()
-
-            newXpos = curItemXpos
-            newYpos = curTrackYpos - TRACK_HEIGHT
-
-            newSelectedItem = self.scene().itemAt(
-                QtCore.QPointF(
-                    newXpos,
-                    newYpos
-                ),
-                QtGui.QTransform()
-            )
-
-            if not newSelectedItem or isinstance(newSelectedItem, Track):
-                newYpos = newYpos - TRANSITION_HEIGHT
-        else:
-            newXpos = curItemXpos
-            newYpos = curSelectedItem.y()
-
-        newPosition = QtCore.QPointF(newXpos, newYpos)
-
-        return self.scene().itemAt(newPosition, QtGui.QTransform())
-
-    # this function is not needed anymore
-    def _get_down_item(self, curSelectedItem):
-        curItemXpos = curSelectedItem.pos().x()
-
-        if curSelectedItem.parentItem():
-            curTrackYpos = curSelectedItem.parentItem().pos().y()
-            newXpos = curItemXpos
-            newYpos = curTrackYpos + TRACK_HEIGHT
-
-            newSelectedItem = self.scene().itemAt(
-                QtCore.QPointF(
-                    newXpos,
-                    newYpos
-                ),
-                QtGui.QTransform()
-            )
-
-            if not newSelectedItem or isinstance(newSelectedItem, Track):
-                newYpos = newYpos + TRANSITION_HEIGHT
-
-            if newYpos < TRACK_HEIGHT:
-                newYpos = TRACK_HEIGHT
-        else:
-            newXpos = curItemXpos
-            newYpos = MARKER_SIZE + TIME_SLIDER_HEIGHT + 1
-            newYpos = TIME_SLIDER_HEIGHT
-        newPosition = QtCore.QPointF(newXpos, newYpos)
-
-        return self.scene().itemAt(newPosition, QtGui.QTransform())
-
     def _deselect_all_items(self):
         if self.scene().selectedItems:
             for selectedItem in self.scene().selectedItems():
@@ -1230,12 +1184,19 @@ class CompositionView(QtWidgets.QGraphicsView):
         ruler_vis = ruler.isVisible()
         ruler.setVisible(not ruler_vis)
 
-        if key in [QtCore.Qt.Key_Left, QtCore.Qt.Key_Right, 
-                   QtCore.Qt.Key_Up, QtCore.Qt.Key_Down] :
-            filters = self.get_filters()
-            newSelectedItem = self.scene().get_next_item_filters(
-                              curSelectedItem, key, filters)
-            
+        if key in [QtCore.Qt.Key_Left, QtCore.Qt.Key_Right,
+                   QtCore.Qt.Key_Up, QtCore.Qt.Key_Down]:
+            # check if last key was the opposite direction of current one
+            if KEY_SYM[key] == self._last_item_cache["key"] and \
+               not curSelectedItem == self._last_item_cache["item"]:
+                newSelectedItem = self._last_item_cache["item"]
+            else:
+                filters = self.get_filters()
+                newSelectedItem = self.scene().get_next_item_filters(
+                                curSelectedItem, key, filters)
+
+            self._last_item_cache["item"] = curSelectedItem
+            self._last_item_cache["key"] = key
         elif key in [QtCore.Qt.Key_Return, QtCore.Qt.Key_Return]:
             if isinstance(curSelectedItem, NestedItem):
                 curSelectedItem.keyPressEvent(key_event)
@@ -1249,8 +1210,8 @@ class CompositionView(QtWidgets.QGraphicsView):
         self.setInteractive(True)
 
         # Remove Ruler instance from selection
-        selections = filter(lambda x : not isinstance(x, Ruler),
-                self.scene().selectedItems())
+        selections = filter(lambda x: not isinstance(x, Ruler),
+                            self.scene().selectedItems())
         # No item selected, so select the first item
         if len(selections) <= 0:
             newSelectedItem = self._get_first_item()
@@ -1316,18 +1277,21 @@ class CompositionView(QtWidgets.QGraphicsView):
         for item in items_to_scale:
             item.counteract_zoom(zoom_level)
 
-    def navigationfilter_changed(self, value):
+    def navigationfilter_changed(self, bitmask):
         '''
         Update the navigation filter
+        and reset _last_item_cache
         '''
-        print "in timeline_you widget", value
-        self.navigation_filter = "Marker"
+        self._navigation_filter = list()
+        for item in Nav.GetClass(bitmask):
+            self._navigation_filter.append(
+                item._replace(otioItem=eval(item.otioItem)))
+
+        self._last_item_cache = {"key": None, "item": None}
 
     def get_filters(self):
-        '''
-        @ TODO for testing
-        '''
-        return [GapItem]
+        return self._navigation_filter
+
 
 class Timeline(QtWidgets.QTabWidget):
 
